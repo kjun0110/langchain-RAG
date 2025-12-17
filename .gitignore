@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+**/node_modules/
 /.pnp
 .pnp.js
 
@@ -10,6 +11,7 @@
 
 # next.js
 /.next/
+**/.next/
 /out/
 
 # production
@@ -55,3 +57,6 @@ build/
 
 # Python model files
 api/app/model/
+
+# LangChain library (if not needed in repo)
+libs/langchain/
