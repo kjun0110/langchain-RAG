@@ -47,7 +47,7 @@ jobs:
       - name: Setup virtual environment & start app
         run: |
           echo "🔧 Setting up virtual environment and starting application..."
-          ssh $EC2_USERNAME@$EC2_HOST "OPENAI_API_KEY='$OPENAI_API_KEY' bash" << 'ENDSSH'
+          ssh $EC2_USERNAME@$EC2_HOST bash << ENDSSH
             set -e
 
             # 변수 설정
@@ -55,6 +55,7 @@ jobs:
             VENV_DIR=/home/ubuntu/venv
             LOG_FILE=/home/ubuntu/app.log
             PID_FILE=/home/ubuntu/app.pid
+            OPENAI_API_KEY_VALUE="$OPENAI_API_KEY"
 
             cd /home/ubuntu
 
@@ -88,18 +89,27 @@ jobs:
             cd $APP_DIR
 
             # Python 경로 설정 (app.model import를 위해)
-            export PYTHONPATH="$APP_DIR:$PYTHONPATH"
+            export PYTHONPATH="$APP_DIR:\$PYTHONPATH"
 
-            # 환경 변수 설정 (OPENAI_API_KEY는 이미 SSH로 전달됨)
-            HOST=0.0.0.0 PORT=8000 MODE=api OPENAI_API_KEY="$OPENAI_API_KEY" nohup $VENV_DIR/bin/python main.py > $LOG_FILE 2>&1 &
-            APP_PID=$!
-            echo $APP_PID > $PID_FILE
-          ENDSSH
+            # 환경 변수 설정
+            export OPENAI_API_KEY="\$OPENAI_API_KEY_VALUE"
+            export HOST=0.0.0.0
+            export PORT=8000
+            export MODE=api
+
+            # 로그 파일 미리 생성
+            touch $LOG_FILE
+
+            # 애플리케이션 실행
+            nohup $VENV_DIR/bin/python main.py > $LOG_FILE 2>&1 &
+            APP_PID=\$!
+            echo \$APP_PID > $PID_FILE
+            echo "✅ Application started (PID: \$APP_PID)"
 
             # 프로세스 시작 확인
             sleep 3
-            if ps -p $APP_PID > /dev/null 2>&1; then
-              echo "✅ Application started (PID: $APP_PID)"
+            if ps -p \$APP_PID > /dev/null 2>&1; then
+              echo "✅ Process is running"
 
               # 포트 체크
               sleep 2
@@ -107,11 +117,11 @@ jobs:
                 echo "✅ Port 8000 is listening"
               else
                 echo "⚠️ Port 8000 not listening yet, checking logs..."
-                tail -30 $LOG_FILE || echo "No log file found"
+                tail -30 $LOG_FILE 2>/dev/null || echo "No log file found"
               fi
             else
               echo "❌ Application failed to start. Checking logs..."
-              tail -50 $LOG_FILE || echo "No log file found"
+              tail -50 $LOG_FILE 2>/dev/null || echo "No log file found"
               exit 1
             fi
           ENDSSH
