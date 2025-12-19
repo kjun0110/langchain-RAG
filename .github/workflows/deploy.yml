@@ -12,6 +12,7 @@ jobs:
     env:
       EC2_HOST: ${{ secrets.EC2_HOST }}
       EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       APP_DIR: /home/ubuntu/app
       VENV_DIR: /home/ubuntu/venv
       LOG_FILE: /home/ubuntu/app.log
@@ -46,7 +47,7 @@ jobs:
       - name: Setup virtual environment & start app
         run: |
           echo "🔧 Setting up virtual environment and starting application..."
-          ssh $EC2_USERNAME@$EC2_HOST << 'ENDSSH'
+          ssh $EC2_USERNAME@$EC2_HOST "OPENAI_API_KEY='$OPENAI_API_KEY' bash" << 'ENDSSH'
             set -e
 
             # 변수 설정
@@ -85,9 +86,15 @@ jobs:
             # 앱 시작
             echo "🚀 Starting application..."
             cd $APP_DIR
-            HOST=0.0.0.0 PORT=8000 MODE=api nohup $VENV_DIR/bin/python main.py > $LOG_FILE 2>&1 &
+
+            # Python 경로 설정 (app.model import를 위해)
+            export PYTHONPATH="$APP_DIR:$PYTHONPATH"
+
+            # 환경 변수 설정 (OPENAI_API_KEY는 이미 SSH로 전달됨)
+            HOST=0.0.0.0 PORT=8000 MODE=api OPENAI_API_KEY="$OPENAI_API_KEY" nohup $VENV_DIR/bin/python main.py > $LOG_FILE 2>&1 &
             APP_PID=$!
             echo $APP_PID > $PID_FILE
+          ENDSSH
 
             # 프로세스 시작 확인
             sleep 3
