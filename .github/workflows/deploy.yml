@@ -59,12 +59,34 @@ jobs:
             set -e  # 오류 발생 시 스크립트 중단
             cd /home/ubuntu
 
-            # venv가 없으면 생성 (python3 명시적 사용)
+            # python3 설치 확인
+            if ! command -v python3 &> /dev/null; then
+              echo "❌ Error: python3 is not installed"
+              exit 1
+            fi
+            echo "✅ python3 found: $(which python3)"
+
+            # venv가 없거나 손상된 경우 생성/재생성 (python3 명시적 사용)
             if [ ! -d "venv" ]; then
               echo "📦 Creating virtual environment with python3..."
               python3 -m venv venv
+            elif [ ! -f "venv/bin/pip" ] || [ ! -f "venv/bin/python" ]; then
+              echo "⚠️ Virtual environment exists but is corrupted. Recreating..."
+              rm -rf venv
+              python3 -m venv venv
+              echo "✅ Virtual environment recreated"
             else
-              echo "✅ Virtual environment already exists"
+              echo "✅ Virtual environment already exists and is valid"
+            fi
+
+            # 가상환경의 pip와 python 존재 확인
+            if [ ! -f "/home/ubuntu/venv/bin/pip" ]; then
+              echo "❌ Error: pip not found in virtual environment"
+              exit 1
+            fi
+            if [ ! -f "/home/ubuntu/venv/bin/python" ]; then
+              echo "❌ Error: python not found in virtual environment"
+              exit 1
             fi
 
             # 가상환경의 pip를 직접 사용하여 패키지 설치 (활성화 없이)
