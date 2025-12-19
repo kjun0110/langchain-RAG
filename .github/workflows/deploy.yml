@@ -9,6 +9,16 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      APP_DIR: /home/ubuntu/app
+      VENV_DIR: /home/ubuntu/venv
+      LOG_FILE: /home/ubuntu/app.log
+      PID_FILE: /home/ubuntu/app.pid
+      MAX_RETRIES: 15
+      RETRY_INTERVAL: 3
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,72 +30,123 @@ jobs:
 
       - name: Add EC2 to known hosts
         run: |
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
 
-      - name: Deploy to EC2
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      - name: Deploy application files
         run: |
-          echo "🚀 Starting deployment to EC2..."
-
-          ssh $EC2_USERNAME@$EC2_HOST "mkdir -p ~/app"
-
-          echo "📦 Transferring files..."
+          echo "🚀 Creating app directory and transferring files..."
+          ssh $EC2_USERNAME@$EC2_HOST "mkdir -p $APP_DIR"
           rsync -avz --delete \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
             --exclude='.git' \
-            api/app/ $EC2_USERNAME@$EC2_HOST:~/app/
+            api/app/ $EC2_USERNAME@$EC2_HOST:$APP_DIR/
+          echo "✅ Files transferred"
 
-          echo "✅ File transfer completed!"
-
-      - name: Setup virtual environment and run application
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      - name: Setup virtual environment & start app
         run: |
           echo "🔧 Setting up virtual environment and starting application..."
-
           ssh $EC2_USERNAME@$EC2_HOST << 'ENDSSH'
+            set -e
+
+            # 변수 설정
+            APP_DIR=/home/ubuntu/app
+            VENV_DIR=/home/ubuntu/venv
+            LOG_FILE=/home/ubuntu/app.log
+            PID_FILE=/home/ubuntu/app.pid
+
             cd /home/ubuntu
 
-            if [ ! -d "venv" ]; then
+            # 가상환경 생성
+            if [ ! -d "$VENV_DIR" ]; then
               echo "📦 Creating virtual environment..."
-              python3 -m venv venv
+              python3 -m venv $VENV_DIR
             else
-              echo "✅ Virtual environment already exists"
+              echo "✅ Virtual environment exists"
             fi
 
+            # 패키지 설치
             echo "📥 Installing/upgrading packages..."
-            source venv/bin/activate
+            source $VENV_DIR/bin/activate
+            pip install --upgrade pip --no-cache-dir
 
-            # CPU 전용 torch 먼저 설치 (디스크 공간 절약, 약 1.5GB 절약)
+            # CPU 전용 torch 먼저 설치 (디스크 공간 절약)
             pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
 
-            # app 폴더의 requirements.txt 사용 (CPU 전용 패키지)
-            pip install -r app/requirements.txt --upgrade --no-cache-dir
+            # 나머지 패키지 설치
+            pip install -r $APP_DIR/requirements.txt --upgrade --no-cache-dir
 
+            # 기존 프로세스 종료
             echo "🛑 Stopping existing application..."
             pkill -f "python.*main.py" || true
+            pkill -f "$VENV_DIR/bin/python.*main.py" || true
             sleep 2
 
+            # 앱 시작
             echo "🚀 Starting application..."
-            cd app
-            HOST=0.0.0.0 PORT=8000 MODE=api nohup python main.py > ../app.log 2>&1 &
-            echo $! > ../app.pid
+            cd $APP_DIR
+            HOST=0.0.0.0 PORT=8000 MODE=api nohup $VENV_DIR/bin/python main.py > $LOG_FILE 2>&1 &
+            APP_PID=$!
+            echo $APP_PID > $PID_FILE
 
-            echo "✅ Application started (PID: $(cat ../app.pid))"
+            # 프로세스 시작 확인
+            sleep 3
+            if ps -p $APP_PID > /dev/null 2>&1; then
+              echo "✅ Application started (PID: $APP_PID)"
+
+              # 포트 체크
+              sleep 2
+              if ss -tlnp 2>/dev/null | grep :8000 || netstat -tlnp 2>/dev/null | grep :8000; then
+                echo "✅ Port 8000 is listening"
+              else
+                echo "⚠️ Port 8000 not listening yet, checking logs..."
+                tail -30 $LOG_FILE || echo "No log file found"
+              fi
+            else
+              echo "❌ Application failed to start. Checking logs..."
+              tail -50 $LOG_FILE || echo "No log file found"
+              exit 1
+            fi
           ENDSSH
 
-          echo "✅ Deployment completed!"
-
-      - name: Health Check
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      - name: Health check
         run: |
           echo "🏥 Running health check..."
-          sleep 10
-          ssh $EC2_USERNAME@$EC2_HOST "curl -f http://localhost:8000/health || exit 1"
-          echo "✅ Health check passed!"
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "⏳ Attempt $i/$MAX_RETRIES..."
+
+            # 프로세스 확인
+            if ssh $EC2_USERNAME@$EC2_HOST "ps -p \$(cat $PID_FILE 2>/dev/null) > /dev/null 2>&1"; then
+              # Health check
+              if ssh $EC2_USERNAME@$EC2_HOST "curl -f http://localhost:8000/health > /dev/null 2>&1"; then
+                echo "✅ Health check passed!"
+                exit 0
+              else
+                echo "⚠️ Health check failed, but process is running. Retrying..."
+              fi
+            else
+              echo "❌ Process not found. Checking logs..."
+              ssh $EC2_USERNAME@$EC2_HOST "tail -50 $LOG_FILE 2>/dev/null || echo 'No log file'"
+            fi
+
+            # 마지막 시도가 아니면 대기
+            if [ $i -lt $MAX_RETRIES ]; then
+              sleep $RETRY_INTERVAL
+            fi
+          done
+
+          echo "❌ Health check failed after $MAX_RETRIES attempts. Showing diagnostics..."
+          ssh $EC2_USERNAME@$EC2_HOST << 'ENDSSH'
+            echo "--- Process Status ---"
+            ps aux | grep -E "python.*main.py" | grep -v grep || echo "No process found"
+            echo ""
+            echo "--- Last 100 lines of logs ---"
+            tail -100 /home/ubuntu/app.log 2>/dev/null || echo "No log file found"
+            echo ""
+            echo "--- Port 8000 status ---"
+            ss -tlnp 2>/dev/null | grep :8000 || netstat -tlnp 2>/dev/null | grep :8000 || echo "Port 8000 not listening"
+            echo ""
+            echo "--- PID file ---"
+            cat /home/ubuntu/app.pid 2>/dev/null || echo "No PID file found"
+          ENDSSH
+          exit 1
