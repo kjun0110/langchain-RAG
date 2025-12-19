@@ -9,7 +9,7 @@ POST /api/chat
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -52,7 +52,7 @@ def get_chat_service():
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """챗봇 API 엔드포인트 - ChatService를 사용한 RAG 체인."""
     # ChatService 인스턴스 가져오기
     chat_service = get_chat_service()
@@ -62,15 +62,37 @@ async def chat(request: ChatRequest):
             detail="ChatService가 초기화되지 않았습니다. 서버를 재시작해주세요.",
         )
 
+    # 요청자의 IP 주소 확인 (localhost 여부 판단)
+    client_host = http_request.client.host if http_request.client else None
+    is_localhost = (
+        client_host == "127.0.0.1"
+        or client_host == "localhost"
+        or client_host == "::1"
+        or (client_host and client_host.startswith("127."))
+    )
+
     # 모델 타입에 따라 적절한 RAG 체인 선택
     # 프론트엔드에서 전달된 model_type이 없으면 .env의 LLM_PROVIDER 사용
     model_type = request.model_type or os.getenv("LLM_PROVIDER", "openai")
     if model_type:
         model_type = model_type.lower()
 
+    # 환경과 모델 타입 불일치 검증
+    if is_localhost and model_type == "openai":
+        raise HTTPException(
+            status_code=400,
+            detail="현재 로컬환경입니다. 로컬 모델을 사용해주세요.",
+        )
+
+    if not is_localhost and model_type == "local":
+        raise HTTPException(
+            status_code=400,
+            detail="현재 로컬 환경이 아닙니다. OpenAI 모델을 사용해주세요.",
+        )
+
     # 디버깅: 받은 model_type 로그 출력
     print(
-        f"[DEBUG] 받은 model_type: {request.model_type}, 처리된 model_type: {model_type}"
+        f"[DEBUG] 받은 model_type: {request.model_type}, 처리된 model_type: {model_type}, client_host: {client_host}, is_localhost: {is_localhost}"
     )
 
     try:
