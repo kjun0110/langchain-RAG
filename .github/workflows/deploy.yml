@@ -10,22 +10,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # GitHub 레포지토리 전체 체크아웃
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # SSH 키 설정 (EC2 접속용)
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.8.0
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      # EC2 호스트를 known_hosts에 추가 (SSH 연결 시 호스트 검증)
       - name: Add EC2 to known hosts
         run: |
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-      # api/app 폴더를 EC2의 /home/ubuntu/app으로 배포
       - name: Deploy to EC2
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -33,11 +29,9 @@ jobs:
         run: |
           echo "🚀 Starting deployment to EC2..."
 
-          # app 디렉토리 생성 (없으면 자동 생성)
           ssh $EC2_USERNAME@$EC2_HOST "mkdir -p ~/app"
 
-          # api/app 폴더만 EC2의 /home/ubuntu/app으로 rsync 전송
-          echo "📦 Transferring api/app files to EC2..."
+          echo "📦 Transferring files..."
           rsync -avz --delete \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
@@ -46,7 +40,6 @@ jobs:
 
           echo "✅ File transfer completed!"
 
-      # 가상환경 생성 및 패키지 설치, 애플리케이션 실행
       - name: Setup virtual environment and run application
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -54,12 +47,9 @@ jobs:
         run: |
           echo "🔧 Setting up virtual environment and starting application..."
 
-          # 가상환경 생성 (없으면), 패키지 설치, 애플리케이션 실행
           ssh $EC2_USERNAME@$EC2_HOST << 'ENDSSH'
-            set -e  # 오류 발생 시 스크립트 중단
             cd /home/ubuntu
 
-            # venv가 없으면 생성
             if [ ! -d "venv" ]; then
               echo "📦 Creating virtual environment..."
               python3 -m venv venv
@@ -67,17 +57,14 @@ jobs:
               echo "✅ Virtual environment already exists"
             fi
 
-            # 가상환경 활성화 및 패키지 설치
             echo "📥 Installing/upgrading packages..."
             source venv/bin/activate
             pip install -r requirements.txt --upgrade
 
-            # 기존 main.py 프로세스 종료 (이미 실행 중인 경우)
             echo "🛑 Stopping existing application..."
             pkill -f "python.*main.py" || true
             sleep 2
 
-            # 애플리케이션 실행 (백그라운드, HOST=0.0.0.0으로 외부 접근 가능)
             echo "🚀 Starting application..."
             cd app
             HOST=0.0.0.0 PORT=8000 MODE=api nohup python main.py > ../app.log 2>&1 &
@@ -88,45 +75,12 @@ jobs:
 
           echo "✅ Deployment completed!"
 
-      # 헬스 체크 (애플리케이션 정상 실행 확인, 재시도 10회, 3초 간격)
       - name: Health Check
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
         run: |
           echo "🏥 Running health check..."
-          MAX_RETRIES=10
-          RETRY_INTERVAL=3
-          RETRY_COUNT=0
-
-          # 초기 대기 시간 (애플리케이션 시작 시간 확보)
-          echo "⏳ Waiting for application to start..."
-          sleep 5
-
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            # curl이 설치되어 있는지 확인하고, 없으면 wget 사용
-            if ssh $EC2_USERNAME@$EC2_HOST "command -v curl > /dev/null 2>&1 && curl -f http://localhost:8000/health > /dev/null 2>&1 || command -v wget > /dev/null 2>&1 && wget -q --spider http://localhost:8000/health > /dev/null 2>&1"; then
-              echo "✅ Health check passed!"
-              exit 0
-            else
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "⏳ Health check failed. Retry $RETRY_COUNT/$MAX_RETRIES (waiting ${RETRY_INTERVAL}s)..."
-                sleep $RETRY_INTERVAL
-              fi
-            fi
-          done
-
-          echo "❌ Health check failed after $MAX_RETRIES attempts"
-          echo "📋 Checking application status..."
-          ssh $EC2_USERNAME@$EC2_HOST << 'ENDSSH'
-            echo "--- Process Status ---"
-            ps aux | grep -E "python.*main.py|uvicorn" | grep -v grep || echo "No application process found"
-            echo ""
-            echo "--- Application Logs (last 50 lines) ---"
-            tail -50 /home/ubuntu/app.log 2>/dev/null || echo "No log file found at /home/ubuntu/app.log"
-            echo ""
-            echo "--- Port 8000 Status ---"
-            netstat -tlnp 2>/dev/null | grep :8000 || ss -tlnp 2>/dev/null | grep :8000 || echo "Port 8000 not listening"
-          ENDSSH
-          exit 1
+          sleep 10
+          ssh $EC2_USERNAME@$EC2_HOST "curl -f http://localhost:8000/health || exit 1"
+          echo "✅ Health check passed!"
